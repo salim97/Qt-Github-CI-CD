@@ -37,7 +37,7 @@ jobs:
           install-deps: 'true'
           modules: 'qtcharts qtwebengine'
           cached: 'false'
-          setup-python: 'false'
+          setup-python: 'true'
           tools: 'tools_ifw,4.1.1,qt.tools.ifw.41 tools_qtcreator,5.0.2-0,qt.tools.qtcreator'
           set-env: 'false'
           tools-only: 'false'
