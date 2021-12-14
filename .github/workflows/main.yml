@@ -1,88 +1,75 @@
-# This is a basic workflow to help you get started with Actions
-
-name: CI
-
-# Controls when the workflow will run
+name: Release on Tag
 on:
-  # Triggers the workflow on push or pull request events but only for the main branch
   push:
+    tags:
+      - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
+  
 jobs:
-  build:
-    name: Build
-    # 运行平台， windows-latest目前是windows server 2019 
-    # 参考文档 https://github.com/actions/virtual-environments/blob/main/images/win/Windows2019-Readme.md
-    runs-on: windows-2019
-    strategy:
-      # 矩阵配置
-      matrix:
-        include:
-          # 5.15.2 参考 https://mirrors.cloud.tencent.com/qt/online/qtsdkrepository/windows_x86/desktop/qt5_5152/
-          - qt_ver: 5.15.2          
-            qt_arch: win64_msvc2019_64
-            msvc_arch: x64
-            qt_arch_install: msvc2019_64          
-    env:
-      targetName: HelloActions-Qt.exe
-    # 步骤
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      # We can access this values in the other jobs
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+      #sha_short: ${{ steps.vars.outputs.sha_short }}
     steps:
-      # 安装Qt
-      - name: Install Qt
-        # 使用外部action。这个action专门用来安装Qt
-        uses: jurplel/install-qt-action@v2.13.0
-        with:
-          # Version of Qt to install
-          version: ${{ matrix.qt_ver }}
-          # Target platform for build
-          # target: ${{ matrix.qt_target }}
-          arch: ${{ matrix.qt_arch }}
-          cached: 'false'
-      # 拉取代码
-      - uses: actions/checkout@v2
-        with:
-          fetch-depth: 1
-      # msvc编译
-      - name: msvc-build
-        id: build
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.msvc_arch }}
-          qmake
-          nmake
-          echo winSdkDir=%WindowsSdkDir% >> %GITHUB_ENV%
-          echo winSdkVer=%WindowsSdkVersion% >> %GITHUB_ENV%
-          echo vcToolsInstallDir=%VCToolsInstallDir% >> %GITHUB_ENV%
-          echo vcToolsRedistDir=%VCToolsRedistDir% >> %GITHUB_ENV%
-      # 打包 
-      - name: package
-        id: package      
-        env:
-          archiveName: ${{ matrix.qt_ver }}-${{ matrix.qt_target }}-${{ matrix.qt_arch }}
-          msvcArch: ${{ matrix.msvc_arch }}          
-        shell: pwsh
-        run: |
-          & scripts\windows-publish.ps1 ${env:archiveName} ${env:targetName}
-          # 记录packageName给后续step
-           $name = ${env:archiveName}
-           echo "::set-output name=packageName::$name"       
-      # tag 查询github-Release
-      # 上传artifacts          
-      - uses: actions/upload-artifact@v2
-        with:
-          name: ${{ steps.package.outputs.packageName }}
-          path: ${{ steps.package.outputs.packageName }}.zip
-      # tag 上传Release
-      - name: uploadRelease
-        if: startsWith(github.event.ref, 'refs/tags/')
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ${{ steps.package.outputs.packageName }}.zip
-          asset_name: ${{ steps.package.outputs.packageName }}.zip
-          tag: ${{ github.ref }}
-          overwrite: true 
+    - name: Get current date
+      id: date
+      run: echo "::set-output name=date::$(date +'%Y-%m-%d-%s')"
+    - name: Get the version
+      id: get_version
+      run: echo ::set-output name=version::release-${{ steps.date.outputs.date }}
+    - name: Create Release #issue in this step
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: ${{ steps.get_version.outputs.version }}
+        draft: false
+        prerelease: false
+
+  build-windows:
+    runs-on: windows-latest
+    needs: [create-release]
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v2
+      with:
+        submodules: recursive
+    - name: Cache Qt
+      id: cache-qt
+      uses: actions/cache@v1
+      with:
+        path: ../Qt
+        key: ${{ runner.os }}-Qt-${{ needs.create-release.outputs.version }}
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v2
+      with:
+    # This is required or cannot compile it
+        arch: win64_mingw73
+        cached: ${{ steps.cache-qt.outputs.cache-hit }}
+        version: '5.12.8'
+    - name: Makefile
+      run: mkdir build/out && cd build && qmake -makefile -o Makefile CONFIG+="release" ../Qt_QML_Github_Action/Qt_QML_Github_Action.pro
+    - name: MinGW libraries 
+      run: cp "..\Qt\5.12.8\mingw73_64\bin\libgcc_s_seh-1.dll" ".\build\out" && cp "..\Qt\5.12.8\mingw73_64\bin\libstdc++-6.dll" ".\build\out" && cp "..\Qt\5.12.8\mingw73_64\bin\libwinpthread-1.dll" ".\build\out"
+    - name: Build
+    # windeployqt is required to find all the libraries, don't find the C++
+      run: cd build && make && mv ./release/rest_api.exe ./out && windeployqt --qmldir ../Qt_QML_Github_Action --compiler-runtime --no-svg --no-opengl-sw --no-angle --no-system-d3d-compiler ./out/rest_api.exe
+    - name: Package project 
+      # Path to the build is different in windows, also the command
+      run: Compress-Archive -Path "build/out/*" -DestinationPath windows.zip
+    - name: Upload Release Asset
+      id: upload-release-asset 
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./windows.zip
+        asset_name: windows-${{ needs.create-release.outputs.version }}-rest_api.zip
+        asset_content_type: application/zip
+
